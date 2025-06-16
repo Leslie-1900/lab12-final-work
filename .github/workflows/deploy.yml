@@ -4,16 +4,16 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:  # 支持手动触发部署
+  workflow_dispatch:
     inputs:
       env:
         description: '部署环境'
         required: true
         default: 'production'
-        options:
-          - development
-          - staging
-          - production
+
+env:
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/lab12-final-work
+  DOCKER_TAG: latest,${{ github.sha }}
 
 jobs:
   deploy:
@@ -21,98 +21,48 @@ jobs:
     permissions:
       contents: read
       packages: write
-    env:
-      DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/lab12-final-work
-      SHORT_SHA: ${{ github.sha }}
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0  # 拉取完整历史记录
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
-        id: buildx
         with:
-          driver: 'docker-container'
-          config: ${{ secrets.DOCKER_BUILDX_CONFIG || '' }}
+          driver: docker-container
 
       - name: Login to Docker Hub
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-        env:
-          DOCKER_CONFIG: ${{ runner.temp }}/.docker
+          logout: true  # 安全退出
 
-      - name: Build and push Docker image
-        id: docker-build
+      - name: Build and push
         uses: docker/build-push-action@v4
         with:
           context: .
           file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.DOCKER_IMAGE }}:latest
-            ${{ env.DOCKER_IMAGE }}:${{ env.SHORT_SHA }}
-          cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:cache
-          cache-to: |
-            type=registry,ref=${{ env.DOCKER_IMAGE }}:cache,mode=max
+          push: true
+          tags: ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}
           labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.commit=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
-            NODE_ENV=${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
+            NODE_ENV=production
             COMMIT_SHA=${{ github.sha }}
-        env:
-          DOCKER_BUILDKIT: 1
+          # 移除缓存配置（先确保基础推送能工作）
+          # cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:cache
+          # cache-to: type=registry,ref=${{ env.DOCKER_IMAGE }}:cache,mode=max
 
-      - name: Deploy to server via SSH
-        if: ${{ github.ref == 'refs/heads/main' }}  # 仅主分支触发部署
+      - name: Deploy to server
+        if: ${{ github.ref == 'refs/heads/main' }}
         uses: appleboy/ssh-action@v0.1.8
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SERVER_SSH_PORT || 22 }}
-          timeout: 60s
-          command_timeout: 10m
           script: |
-            set -e  # 任何命令失败立即退出
-
-            # 环境检查
-            echo "===== 环境检查 ====="
-            docker --version || { echo "Docker 未安装"; exit 1; }
-            docker compose version || { echo "Docker Compose 未安装"; exit 1; }
-
-            # 项目目录
-            PROJECT_PATH="${{ secrets.PROJECT_PATH || '/var/www/lab12-final-work' }}"
-            mkdir -p "$PROJECT_PATH"
-            chmod 750 "$PROJECT_PATH"
-            chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER_GROUP || 'users' }} "$PROJECT_PATH"
-            cd "$PROJECT_PATH"
-
-            # Git 操作
-            echo "===== Git 操作 ====="
-            if [ ! -d ".git" ]; then
-              git clone --depth=1 https://github.com/${{ github.repository }}.git . || exit 1
-            else
-              git fetch --all || exit 1
-              git reset --hard origin/main || exit 1
-            fi
-
-            # Docker 部署
-            echo "===== Docker 部署 ====="
-            docker compose pull || exit 1
-            docker compose up -d --remove-orphans || exit 1
-
-            # 健康检查
-            sleep 10  # 等待容器启动
-            if ! docker compose ps | grep -q "Up"; then
-              echo "容器未正常运行"
-              docker compose logs
-              exit 1
-            fi
-
-            echo "✅ 部署成功"
+            docker pull ${{ env.DOCKER_IMAGE }}:${{ github.sha }}
+            docker tag ${{ env.DOCKER_IMAGE }}:${{ github.sha }} ${{ env.DOCKER_IMAGE }}:latest
+            docker-compose up -d
