@@ -1,0 +1,38 @@
+version: "3"
+services:
+  # 静态网页服务（基于你的 index.html）
+  website:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"  # 宿主机 8080 端口映射到容器内 80 端口，可根据需求调整
+    restart: always
+    # 若有需要，可挂载代码实现开发时热更新（生产环境一般不用）
+    # volumes:
+    #   - ./:/app 
+
+  # Todo App 服务（使用 mikenye/todo-app 示例，依赖 MongoDB）
+  todo-app:
+    image: mikenye/todo-app:latest
+    ports:
+      - "3000:3000"  # 宿主机 3000 端口映射到容器内 3000 端口
+    volumes:
+      - todo-data:/data  # 持久化 Todo App 数据
+    environment:
+      - MONGODB_URL=mongodb://mongo:27017/todos  # 连接 MongoDB 服务
+    depends_on:
+      - mongo  # 确保先启动 MongoDB
+    restart: always
+
+  # MongoDB 服务（为 Todo App 提供数据库支持）
+  mongo:
+    image: mongo:4.4
+    volumes:
+      - mongo-data:/data/db  # 持久化 MongoDB 数据
+    restart: always
+
+# 定义命名卷，用于数据持久化
+volumes:
+  todo-data:
+  mongo-data:
