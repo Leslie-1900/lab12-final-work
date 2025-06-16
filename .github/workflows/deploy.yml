@@ -21,6 +21,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/lab12-final-work
+      SHORT_SHA: ${{ github.sha }}
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -50,16 +54,16 @@ jobs:
           file: ./Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/lab12-final-work:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/lab12-final-work:${{ github.sha::7 }}
-          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/lab12-final-work:cache
+            ${{ env.DOCKER_IMAGE }}:latest
+            ${{ env.DOCKER_IMAGE }}:${{ env.SHORT_SHA }}
+          cache-from: type=registry,ref=${{ env.DOCKER_IMAGE }}:cache
           cache-to: |
-            type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/lab12-final-work:cache,mode=max
+            type=registry,ref=${{ env.DOCKER_IMAGE }}:cache,mode=max
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.commit=${{ github.sha }}
           build-args: |
-            NODE_ENV=${{ github.ref == 'refs/heads/main' ? 'production' : 'development' }}
+            NODE_ENV=${{ github.ref == 'refs/heads/main' && 'production' || 'development' }}
             COMMIT_SHA=${{ github.sha }}
         env:
           DOCKER_BUILDKIT: 1
@@ -73,90 +77,42 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SERVER_SSH_PORT || 22 }}
           timeout: 60s
-          command_timeout: 5m
-          debug: true  # 启用调试日志
+          command_timeout: 10m
           script: |
-            # 环境信息输出
-            echo "===== 部署环境 ====="
-            echo "当前用户: $(whoami)"
-            echo "服务器时间: $(date)"
-            echo "系统信息: $(uname -a)"
-            echo "Docker 版本: $(docker --version)"
-            echo "Docker Compose 版本: $(docker-compose --version)"
-            
-            # 项目目录处理
+            set -e  # 任何命令失败立即退出
+
+            # 环境检查
+            echo "===== 环境检查 ====="
+            docker --version || { echo "Docker 未安装"; exit 1; }
+            docker compose version || { echo "Docker Compose 未安装"; exit 1; }
+
+            # 项目目录
             PROJECT_PATH="${{ secrets.PROJECT_PATH || '/var/www/lab12-final-work' }}"
-            echo "===== 项目目录 ====="
-            if [ ! -d "$PROJECT_PATH" ]; then
-              echo "创建项目目录: $PROJECT_PATH"
-              mkdir -p "$PROJECT_PATH"
-              chmod 755 "$PROJECT_PATH"
-              chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER_GROUP || 'users' }} "$PROJECT_PATH"
-            fi
+            mkdir -p "$PROJECT_PATH"
+            chmod 750 "$PROJECT_PATH"
+            chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER_GROUP || 'users' }} "$PROJECT_PATH"
             cd "$PROJECT_PATH"
-            echo "当前目录: $(pwd)"
-            ls -la
-            
+
             # Git 操作
             echo "===== Git 操作 ====="
             if [ ! -d ".git" ]; then
-              echo "克隆代码仓库..."
-              git clone --depth=1 ${{ github.server_url }}/${{ github.repository }} .
+              git clone --depth=1 https://github.com/${{ github.repository }}.git . || exit 1
             else
-              echo "拉取最新代码..."
-              git fetch --all
-              git reset --hard origin/main
-              git clean -fdx
+              git fetch --all || exit 1
+              git reset --hard origin/main || exit 1
             fi
-            echo "当前代码版本: $(git rev-parse HEAD)"
-            git status
-            
-            # Docker Compose 部署
+
+            # Docker 部署
             echo "===== Docker 部署 ====="
-            if [ ! -f "docker-compose.yml" ]; then
-              echo "错误: 未找到 docker-compose.yml，部署终止"
+            docker compose pull || exit 1
+            docker compose up -d --remove-orphans || exit 1
+
+            # 健康检查
+            sleep 10  # 等待容器启动
+            if ! docker compose ps | grep -q "Up"; then
+              echo "容器未正常运行"
+              docker compose logs
               exit 1
             fi
-            
-            # 备份当前容器状态（可选）
-            if [ -f "docker-compose.old.yml" ]; then
-              echo "备份旧配置: docker-compose.old.yml"
-              mv docker-compose.yml docker-compose.old.yml
-            fi
-            
-            # 拉取并启动容器
-            echo "拉取镜像..."
-            docker-compose pull
-            echo "启动容器..."
-            docker-compose up -d --remove-orphans
-            
-            # 部署结果检查
-            echo "===== 部署结果 ====="
-            docker-compose ps
-            docker images
-            
-            # 容器健康检查
-            echo "===== 容器健康检查 ====="
-            HEALTHY=true
-            for SERVICE in $(docker-compose ps -q); do
-              STATUS=$(docker inspect -f '{{.State.Running}}' $SERVICE 2>/dev/null || echo "false")
-              if [ "$STATUS" != "true" ]; then
-                echo "服务 $SERVICE 未正常运行"
-                docker logs $SERVICE
-                HEALTHY=false
-              fi
-            done
-            
-            if [ "$HEALTHY" = "false" ]; then
-              echo "部署失败: 部分容器未正常启动"
-              exit 1
-            else
-              echo "部署成功! 所有容器正常运行"
-            fi
-            
-            # 清理临时文件
-            echo "===== 清理操作 ====="
-            if [ -f "docker-compose.old.yml" ]; then
-              echo "删除旧配置: docker-compose.old.yml"
-              rm docker-compose.old.yml
-            fi
+
+            echo "✅ 部署成功"
